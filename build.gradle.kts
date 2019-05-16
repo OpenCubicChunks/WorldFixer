@@ -19,8 +19,9 @@ repositories {
 }
 dependencies {
     testCompile("junit", "junit", "4.12")
-    compile("io.github.opencubicchunks:regionlib:0.52.0-SNAPSHOT")
+    compile("io.github.opencubicchunks:regionlib:0.55.0-SNAPSHOT")
     compile("net.kyori:nbt:1.12-1.0.0-SNAPSHOT")
+    compile("org.fusesource.jansi:jansi:1.18")
 }
 
 configure<JavaPluginConvention> {

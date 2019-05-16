@@ -1,25 +1,32 @@
 package io.github.opencubicchunks.worldfixer;
 
-import cubicchunks.regionlib.api.region.IRegion;
-import cubicchunks.regionlib.api.region.key.IKey;
-import cubicchunks.regionlib.api.region.key.IKeyProvider;
-import cubicchunks.regionlib.api.region.key.RegionKey;
+import static org.fusesource.jansi.Ansi.ansi;
+
 import cubicchunks.regionlib.impl.EntryLocation3D;
 import cubicchunks.regionlib.impl.save.SaveSection3D;
 import cubicchunks.regionlib.lib.ExtRegion;
-import cubicchunks.regionlib.lib.Region;
-import cubicchunks.regionlib.lib.provider.CachedRegionProvider;
+import cubicchunks.regionlib.lib.provider.SharedCachedRegionProvider;
 import cubicchunks.regionlib.lib.provider.SimpleRegionProvider;
-import cubicchunks.regionlib.util.CheckedConsumer;
 import net.kyori.nbt.CompoundTag;
 import net.kyori.nbt.TagIO;
+import org.fusesource.jansi.Ansi;
+import org.fusesource.jansi.Ansi.Color;
+import org.fusesource.jansi.Ansi.Erase;
+import org.fusesource.jansi.AnsiConsole;
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.*;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -28,43 +35,72 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Main {
+
     private static final CompoundTag NULL_TAG = new CompoundTag();
 
-    private static final ExecutorService fixingExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() + 1);
-    private static final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
-    private static final AtomicInteger submittedFix = new AtomicInteger();
-    private static final AtomicInteger submittedIo = new AtomicInteger();
-    private static final AtomicInteger saved = new AtomicInteger();
-    private static final Map<Path, SaveSection3D> savesToClose = new HashMap<>();
+    private final ExecutorService fixingExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() + 1);
+    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicInteger submittedFix = new AtomicInteger();
+    private final AtomicInteger submittedIo = new AtomicInteger();
+    private final AtomicInteger saved = new AtomicInteger();
+    private final Map<Path, SaveSection3D> savesToClose = new HashMap<>();
+
+    private final Output output = new Output();
 
     public static void main(String... args) throws IOException, InterruptedException {
+        new Main().start(args);
+    }
+
+    private void start(String... args) throws IOException, InterruptedException {
         if (args.length == 0 || args[0].equals("-h") || args[0].equals("--help") || args[0].equals("-?")) {
             printHelp();
             return;
         }
+        AnsiConsole.systemInstall();
+        String ansi = System.getProperty("worldfixer.jansi", null);
+        if (ansi == null) {
+            output.jansi = !System.getProperty("os.name").startsWith("Windows") || !Ansi.isEnabled();
+        } else {
+            output.jansi = ansi.equalsIgnoreCase("true");
+        }
         if (args[0].equals("-w") || args[0].equals("--world")) {
             if (args.length != 2) {
-                System.out.println("Expected 2 options but got " + args.length);
+                System.out.println(ansi().fg(Color.RED).a("Expected 2 options but got " + args.length).reset());
                 printHelp();
                 return;
             }
+
+            System.out.print(ansi().eraseScreen(Erase.ALL).cursor(0, 0));
+
+            output.printStatus("Scanning worlds...");
             fixWorld(args[1]);
+            output.printStatus("Waiting for chunk fixes...");
+            output.printInfo("");
+
             fixingExecutor.shutdown();
             fixingExecutor.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
+            if (!fixingExecutor.isTerminated()) {
+                output.printWarning("FIXING EXECUTOR NOT TERMINATED AFTER TERMINATION!");
+            }
+            output.printStatus("Waiting to write save changes...");
             ioExecutor.shutdown();
             ioExecutor.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
-            logProgress();
-            System.out.println();
+            if (!ioExecutor.isTerminated()) {
+                output.printWarning("IO EXECUTOR NOT TERMINATED AFTER TERMINATION!");
+            }
+            logProgress(true);
+            output.printStatus("Closing saves...");
             savesToClose.forEach((p, s) -> {
                 try {
-                    System.out.println("Closing save " + p.toString());
+                    output.printInfo("Closing dimension " + p.getFileName().toString());
                     s.close();
                 } catch (IOException e) {
-                    System.out.println("Error while closing save");
-                    e.printStackTrace(System.out);
+                    output.printError("Error while closing save", e);
                 }
             });
-            System.out.println("Done!");
+            output.printStatus("DONE!");
+            output.printInfo("All dimensions closed");
+            System.out.println("\n\n");
         } else {
             System.out.println("Unrecognized options:\n\t" + String.join("\n\t", args) + "\n");
             printHelp();
@@ -72,22 +108,22 @@ public class Main {
 
     }
 
-    private static void fixWorld(String worldLocation) throws IOException {
+    private void fixWorld(String worldLocation) throws IOException {
         Path path = Paths.get(worldLocation);
-        System.out.println("\nScheduling chunks to fix in dimension in " + path.toAbsolutePath().toString());
+        String dimName = path.getFileName().toString();
+        output.printInfo("Scheduling fixes in dimension " + dimName);
         Path part2d = path.resolve("region2d");
         Files.createDirectories(part2d);
 
         Path part3d = path.resolve("region3d");
         Files.createDirectories(part3d);
         SaveSection3D save = new SaveSection3D(
-                new CachedRegionProvider<>(
-                        RegionProvider.createDefault(new EntryLocation3D.Provider(), part3d), 256
-                ),
-                new CachedRegionProvider<>(
-                        new RegionProvider<>(new EntryLocation3D.Provider(), part3d,
+            new SharedCachedRegionProvider<>(
+                SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3d, 512)),
+            new SharedCachedRegionProvider<>(
+                new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3d,
                                 (keyProvider, regionKey) -> new ExtRegion<>(part3d, Collections.emptyList(), keyProvider, regionKey)
-                        ), 256
+                )
                 ));
         fixSave(save);
         savesToClose.put(path, save);
@@ -97,53 +133,56 @@ public class Main {
                 try {
                     fixWorld(dim.toString());
                 } catch (Throwable t) {
-                    System.out.println("Could not fix dimension at: " + dim.toString());
-                    t.printStackTrace(System.out);
+                    output.printError("Could not fix dimension: " + dim.getFileName().toString(), t);
                 }
             }
         }
     }
 
-    private static void fixSave(SaveSection3D save) throws IOException {
+    private void fixSave(SaveSection3D save) throws IOException {
         save.forAllKeys(location -> {
             ByteBuffer buf = save.load(location).orElse(null);
             if (buf == null) {
+                output.printWarning("Cube at " + location + " doesn't have any data! This should not be possible. Skipping...");
                 return;
             }
             submittedFix.incrementAndGet();
             fixingExecutor.submit(() -> {
                 try {
-                    ByteBuffer newBuf = fixBuffer(buf);
+                    output.printChunkInfo(() -> "Fixing chunk " + location.getEntryX() + ", " + location.getEntryY() + ", " + location.getEntryZ());
+                    ByteBuffer newBuf = fixBuffer(location, buf);
 
                     submittedIo.incrementAndGet();
                     ioExecutor.submit(() -> {
                         try {
                             save.save(location, newBuf);
-
                         } catch (IOException e) {
-                            System.out.println("An error occurred while saving chunk at " + location);
-                            e.printStackTrace(System.out);
+                            output.printError("An error occurred while saving chunk at " + location, e);
                         }
-                        if (saved.incrementAndGet() % 256 == 0) {
-                            logProgress();
-                        }
+                        saved.incrementAndGet();
+                        logProgress(false);
                     });
                 } catch (Throwable t) {
-                    System.out.println("An error occurred while fixing a chunk at " + location);
-                    t.printStackTrace(System.out);
+                    output.printError("An error occurred while fixing chunk at " + location, t);
                 }
             });
         });
     }
 
-    private static void logProgress() {
-        System.out.print(String.format("\r%d/%d/%d (%.2f%%)",
-                saved.get(), submittedIo.get(), submittedFix.get(), 100*saved.get() / (double) submittedFix.get()));
+    private void logProgress(boolean finalPrint) {
+        output.printProgress(() -> String.format("\r%d/%d/%d (%.2f%%)",
+            saved.get(), submittedIo.get(), submittedFix.get(), 100 * saved.get() / (double) submittedFix.get()), finalPrint);
     }
 
-    private static ByteBuffer fixBuffer(ByteBuffer buf) throws IOException {
+    private ByteBuffer fixBuffer(EntryLocation3D loc, ByteBuffer buf) throws IOException {
         CompoundTag tag = TagIO.readCompressedInputStream(new BufferedInputStream(new ByteBufferBackedInputStream(buf)));
-        tag.getCompound("Level", NULL_TAG).putBoolean("isSurfaceTracked", false);
+        CompoundTag level = tag.getCompound("Level", NULL_TAG);
+        if (level == NULL_TAG) {
+            output.printWarning("Cube at " + loc + " has no Level tag! Skipping...");
+            buf.flip();
+            return buf;
+        }
+        level.putBoolean("isSurfaceTracked", false);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (BufferedOutputStream stream = new BufferedOutputStream(out)) {
             TagIO.writeCompressedOutputStream(tag, stream);
@@ -151,14 +190,14 @@ public class Main {
         return ByteBuffer.wrap(out.toByteArray());
     }
 
-    private static void printHelp() {
+    private void printHelp() {
         System.out.println("Usage: java -jar filename.jar options");
         System.out.println("available options are:\n" +
                 "   -h --help -?        print this help text\n" +
                 "   -w --world file     specify world location (required)");
     }
 
-    public static class ByteBufferBackedInputStream extends InputStream {
+    public class ByteBufferBackedInputStream extends InputStream {
 
         ByteBuffer buf;
 
@@ -166,15 +205,16 @@ public class Main {
             this.buf = buf;
         }
 
-        public int read() throws IOException {
+        @Override
+        public int read() {
             if (!buf.hasRemaining()) {
                 return -1;
             }
             return buf.get() & 0xFF;
         }
 
-        public int read(byte[] bytes, int off, int len)
-                throws IOException {
+        @Override
+        public int read(byte[] bytes, int off, int len) {
             if (!buf.hasRemaining()) {
                 return -1;
             }
@@ -182,47 +222,6 @@ public class Main {
             len = Math.min(len, buf.remaining());
             buf.get(bytes, off, len);
             return len;
-        }
-    }
-
-    private static class RegionProvider<K extends IKey<K>> extends SimpleRegionProvider<K> {
-
-        private final IKeyProvider<K> prov;
-
-        public RegionProvider(IKeyProvider<K> keyProvider, Path directory, RegionFactory<K> regionBuilder) {
-            super(keyProvider, directory, regionBuilder);
-            this.prov = keyProvider;
-        }
-
-        @Override
-        public void forAllRegions(CheckedConsumer<? super IRegion<K>, IOException> consumer) throws IOException {
-            Iterator<Path> it = allRegions();
-            while (it.hasNext()) {
-                Path path = it.next();
-                K key;
-                // TODO: temporary hack, this needs redesign of RegionLib
-                try {
-                    key = prov.fromRegionAndId(new RegionKey(path.getFileName().toString()), 0);
-                } catch (RuntimeException ex) {
-                    continue;
-                }
-                IRegion<K> r = getExistingRegion(key).orElse(null);
-                if (r != null) {
-                    consumer.accept(r);
-                    r.close();
-                }
-            }
-        }
-
-        public static <K extends IKey<K>> RegionProvider<K> createDefault(IKeyProvider<K> keyProvider, Path directory) {
-            return new RegionProvider<K>(keyProvider, directory, (keyProv, r) ->
-                    new Region.Builder<K>()
-                            .setDirectory(directory)
-                            .setRegionKey(r)
-                            .setKeyProvider(keyProv)
-                            .setSectorSize(512)
-                            .build()
-            );
         }
     }
 }
