@@ -175,6 +175,7 @@ public class Main {
     }
 
     private ByteBuffer fixBuffer(EntryLocation3D loc, ByteBuffer buf) throws IOException {
+        //lgtm [java/input-resource-leak]
         CompoundTag tag = TagIO.readCompressedInputStream(new BufferedInputStream(new ByteBufferBackedInputStream(buf)));
         CompoundTag level = tag.getCompound("Level", NULL_TAG);
         if (level == NULL_TAG) {
