@@ -24,7 +24,7 @@ import java.util.function.Supplier;
  */
 class Output {
 
-    private final int outputTimer = 200;
+    private final int outputTimer = 800;
     boolean jansi = false;
     private volatile boolean lastNewline = true;
     private String action1 = "";
@@ -33,6 +33,7 @@ class Output {
 
     private volatile long lastProgressPrintTime = System.currentTimeMillis();
     private volatile long lastChunkInfoPrintTime = System.currentTimeMillis();
+    boolean printChunkInfo = false;
 
     void printStatus(String txt) {
         synchronized (Output.class) {
@@ -44,7 +45,7 @@ class Output {
             System.out.print(ansi()
                 .eraseLine(Ansi.Erase.ALL)
                 .fg(Ansi.Color.CYAN)
-                .a(action1 = String.format("%1$-80s", txt))
+                .a(action1 = String.format("%1$-78s", txt))
                 .reset()
                 .cursorToColumn(0));
         }
@@ -86,7 +87,7 @@ class Output {
                 .cursorDownLine()
                 .eraseLine(Ansi.Erase.ALL)
                 .fg(Ansi.Color.CYAN)
-                .a(action2 = String.format("%1$-80s", txt))
+                .a(action2 = String.format("%1$-78s", txt))
                 .reset()
                 .cursorUpLine()
                 .cursorToColumn(0));
@@ -95,6 +96,9 @@ class Output {
 
 
     void printChunkInfo(Supplier<String> info) {
+        if (!printChunkInfo) {
+            return;
+        }
         if (!jansi) {
             return;
         }
@@ -104,15 +108,15 @@ class Output {
                 String txt = info.get();
                 txt = txt.substring(0, Math.min(txt.length(), 80));
 
-                lastChunkInfoPrintTime = time;
                 System.out.print(ansi()
                     .cursorDownLine()
                     .eraseLine(Ansi.Erase.ALL)
                     .fg(Ansi.Color.CYAN)
-                    .a(action2 = String.format("%1$-80s", txt))
+                    .a(action2 = String.format("%1$-78s", txt))
                     .reset()
                     .cursorUpLine()
                     .cursorToColumn(0));
+                lastChunkInfoPrintTime = System.currentTimeMillis();
             }
         }
     }
@@ -123,20 +127,30 @@ class Output {
             synchronized (Output.class) {
                 if (!jansi) {
                     noColorPrint(progress.get());
+                    lastProgressPrintTime = System.currentTimeMillis();
                     return;
                 }
                 String txt = progress.get();
                 txt = txt.substring(0, Math.min(txt.length(), 80));
 
-                lastProgressPrintTime = time;
-                System.out.print(ansi()
-                    .cursorDownLine(2)
-                    .eraseLine(Ansi.Erase.ALL)
-                    .fg(Ansi.Color.GREEN)
-                    .a(lastProgress = String.format("%1$-80s", txt))
-                    .reset()
-                    .cursorUpLine(2)
-                    .cursorToColumn(0));
+                if (printChunkInfo) {
+                    System.out.print(ansi()
+                            .cursorDownLine(2)
+                            .eraseLine(Ansi.Erase.ALL)
+                            .fg(Ansi.Color.GREEN)
+                            .a(lastProgress = String.format("%1$-78s", txt))
+                            .reset()
+                            .cursorUpLine(2)
+                            .cursorToColumn(0));
+                } else {
+                    System.out.print(ansi()
+                            .eraseLine(Ansi.Erase.ALL)
+                            .fg(Ansi.Color.GREEN)
+                            .a(lastProgress = String.format("%1$-78s", txt))
+                            .reset()
+                            .cursorToColumn(0));
+                }
+                lastProgressPrintTime = System.currentTimeMillis();;
             }
         }
     }

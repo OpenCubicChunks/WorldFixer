@@ -2,13 +2,16 @@ package io.github.opencubicchunks.worldfixer;
 
 import static org.fusesource.jansi.Ansi.ansi;
 
+import cubicchunks.regionlib.impl.EntryLocation2D;
 import cubicchunks.regionlib.impl.EntryLocation3D;
+import cubicchunks.regionlib.impl.save.SaveSection2D;
 import cubicchunks.regionlib.impl.save.SaveSection3D;
 import cubicchunks.regionlib.lib.ExtRegion;
 import cubicchunks.regionlib.lib.provider.SharedCachedRegionProvider;
 import cubicchunks.regionlib.lib.provider.SimpleRegionProvider;
 import net.kyori.nbt.CompoundTag;
 import net.kyori.nbt.TagIO;
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.fusesource.jansi.Ansi;
 import org.fusesource.jansi.Ansi.Color;
 import org.fusesource.jansi.Ansi.Erase;
@@ -17,8 +20,11 @@ import org.fusesource.jansi.AnsiConsole;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -33,6 +39,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 public class Main {
 
@@ -58,6 +66,7 @@ public class Main {
         }
         AnsiConsole.systemInstall();
         String ansi = System.getProperty("worldfixer.jansi", null);
+        output.printChunkInfo = Boolean.parseBoolean(System.getProperty("worldfixer.printchunk", "false"));
         if (ansi == null) {
             output.jansi = !System.getProperty("os.name").startsWith("Windows") || !Ansi.isEnabled();
         } else {
@@ -117,18 +126,14 @@ public class Main {
 
         Path part3d = path.resolve("region3d");
         Files.createDirectories(part3d);
-        SaveSection3D save = new SaveSection3D(
-            new SharedCachedRegionProvider<>(
-                SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3d, 512)),
-            new SharedCachedRegionProvider<>(
-                new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3d,
-                                (keyProvider, regionKey) -> new ExtRegion<>(part3d, Collections.emptyList(), keyProvider, regionKey)
-                )
-                ));
-        fixSave(save);
+        SaveSection3D save = SaveSection3D.createAt(part3d);
+        SaveSection2D save2d = SaveSection2D.createAt(part2d);
+
+        fixSave(save, save2d);
         savesToClose.put(path, save);
         try (Stream<Path> stream = Files.list(path)) {
-            Set<Path> dimensions = stream.filter(p -> p.getFileName().toString().startsWith("DIM") && Files.isDirectory(p)).collect(Collectors.toSet());
+            Set<Path> dimensions =
+                    stream.filter(p -> p.getFileName().toString().startsWith("DIM") && Files.isDirectory(p)).collect(Collectors.toSet());
             for (Path dim : dimensions) {
                 try {
                     fixWorld(dim.toString());
@@ -139,16 +144,56 @@ public class Main {
         }
     }
 
-    private void fixSave(SaveSection3D save) throws IOException {
-        save.forAllKeys(location -> {
-            ByteBuffer buf = save.load(location).orElse(null);
-            if (buf == null) {
-                output.printWarning("Cube at " + location + " doesn't have any data! This should not be possible. Skipping...");
-                return;
-            }
+    private void fixSave(SaveSection3D save, SaveSection2D save2d) throws IOException {
+        save2d.forAllKeys(location -> {
             submittedFix.incrementAndGet();
             fixingExecutor.submit(() -> {
                 try {
+                    ByteBuffer buf;
+                    try {
+                        buf = save2d.load(location, true).orElse(null);
+                    } catch (Throwable t) {
+                        output.printError("Error loading column data " + location + ", skipping...", t);
+                        return;
+                    }
+                    if (buf == null) {
+                        output.printWarning("Column at " + location + " doesn't have any data! This should not be possible. Skipping...");
+                        return;
+                    }
+                    output.printChunkInfo(() -> "Fixing chunk " + location.getEntryX() + ", " + location.getEntryZ());
+                    ByteBuffer newBuf = fix2dBuffer(location, buf);
+
+                    submittedIo.incrementAndGet();
+                    ioExecutor.submit(() -> {
+                        try {
+                            save2d.save(location, newBuf);
+                        } catch (IOException e) {
+                            output.printError("An error occurred while saving column at " + location, e);
+                        }
+                        saved.incrementAndGet();
+                        logProgress(false);
+                    });
+                } catch (Throwable t) {
+                    output.printError("An error occurred while fixing column at " + location, t);
+                }
+            });
+        });
+        save.forAllKeys(location -> {
+            submittedFix.incrementAndGet();
+            fixingExecutor.submit(() -> {
+                try {
+                    ByteBuffer buf;
+                    try {
+                        buf = save.load(location, true).orElse(null);
+                    } catch (Throwable t) {
+                        output.printError("Error loading chunk data " + location + ", skipping...", t);
+                        return;
+                    }
+                    if (buf == null) {
+                        output.printWarning("Cube at " + location + " doesn't have any data! This should not be possible. Skipping...");
+                        return;
+                    }
+
                     output.printChunkInfo(() -> "Fixing chunk " + location.getEntryX() + ", " + location.getEntryY() + ", " + location.getEntryZ());
                     ByteBuffer newBuf = fixBuffer(location, buf);
 
@@ -176,7 +221,7 @@ public class Main {
 
     private ByteBuffer fixBuffer(EntryLocation3D loc, ByteBuffer buf) throws IOException {
         //lgtm [java/input-resource-leak]
-        CompoundTag tag = TagIO.readCompressedInputStream(new BufferedInputStream(new ByteBufferBackedInputStream(buf)));
+        CompoundTag tag = readCompressed(buf);
         CompoundTag level = tag.getCompound("Level", NULL_TAG);
         if (level == NULL_TAG) {
             output.printWarning("Cube at " + loc + " has no Level tag! Skipping...");
@@ -186,9 +231,41 @@ public class Main {
         level.putBoolean("isSurfaceTracked", false);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (BufferedOutputStream stream = new BufferedOutputStream(out)) {
-            TagIO.writeCompressedOutputStream(tag, stream);
+            writeCompressed(tag, stream);
         }
         return ByteBuffer.wrap(out.toByteArray());
+    }
+
+
+    private ByteBuffer fix2dBuffer(EntryLocation2D loc, ByteBuffer buf) throws IOException {
+        //lgtm [java/input-resource-leak]
+        CompoundTag tag = readCompressed(buf);
+        CompoundTag level = tag.getCompound("Level", NULL_TAG);
+        if (level == NULL_TAG) {
+            output.printWarning("Column at " + loc + " has no Level tag! Skipping...");
+            buf.flip();
+            return buf;
+        }
+        if (level.contains("OpacityIndex")) {
+            level.remove("OpacityIndex");
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (BufferedOutputStream stream = new BufferedOutputStream(out)) {
+            writeCompressed(tag, stream);
+        }
+        return ByteBuffer.wrap(out.toByteArray());
+    }
+
+    public static @NonNull CompoundTag readCompressed(final @NonNull ByteBuffer input) throws IOException {
+        try (final DataInputStream dis = new DataInputStream(new BufferedInputStream(new GZIPInputStream(new ByteBufferBackedInputStream(input))))) {
+            return TagIO.readDataInput(dis);
+        }
+    }
+
+    public static void writeCompressed(final @NonNull CompoundTag tag, final @NonNull OutputStream output) throws IOException {
+        try (final DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(new GZIPOutputStream(output)))) {
+            TagIO.writeDataOutput(tag, dos);
+        }
     }
 
     private void printHelp() {
@@ -198,7 +275,7 @@ public class Main {
                 "   -w --world file     specify world location (required)");
     }
 
-    public class ByteBufferBackedInputStream extends InputStream {
+    public static class ByteBufferBackedInputStream extends InputStream {
 
         ByteBuffer buf;
 

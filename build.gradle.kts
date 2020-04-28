@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.opencubicchunks"
-version = "1.0-SNAPSHOT"
+version = "1.1-SNAPSHOT"
 
 application {
     mainClassName = "io.github.opencubicchunks.worldfixer.Main"
@@ -19,7 +19,7 @@ repositories {
 }
 dependencies {
     testCompile("junit", "junit", "4.12")
-    compile("io.github.opencubicchunks:regionlib:0.55.0-SNAPSHOT")
+    compile("io.github.opencubicchunks:regionlib:0.61.0-SNAPSHOT")
     compile("net.kyori:nbt:1.12-1.0.0-SNAPSHOT")
     compile("org.fusesource.jansi:jansi:1.18")
 }
