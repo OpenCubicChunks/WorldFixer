@@ -2,13 +2,12 @@ package io.github.opencubicchunks.worldfixer;
 
 import static org.fusesource.jansi.Ansi.ansi;
 
+import cubicchunks.regionlib.api.storage.SaveSection;
 import cubicchunks.regionlib.impl.EntryLocation2D;
 import cubicchunks.regionlib.impl.EntryLocation3D;
 import cubicchunks.regionlib.impl.save.SaveSection2D;
 import cubicchunks.regionlib.impl.save.SaveSection3D;
-import cubicchunks.regionlib.lib.ExtRegion;
-import cubicchunks.regionlib.lib.provider.SharedCachedRegionProvider;
-import cubicchunks.regionlib.lib.provider.SimpleRegionProvider;
+import net.kyori.nbt.ByteArrayTag;
 import net.kyori.nbt.CompoundTag;
 import net.kyori.nbt.TagIO;
 import org.checkerframework.checker.nullness.qual.NonNull;
@@ -29,7 +28,6 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -45,13 +43,30 @@ import java.util.zip.GZIPOutputStream;
 public class Main {
 
     private static final CompoundTag NULL_TAG = new CompoundTag();
+    private static final byte[] NULL_OPACITY_INDEX_DATA;
+    static {
+        ByteArrayOutputStream bout = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bout);
+        for (int i = 0; i < 256; i++) {
+            try {
+                out.writeInt(Integer.MIN_VALUE + 32);
+                out.writeInt(Integer.MIN_VALUE + 32);
+                out.writeShort(0);
+            } catch (IOException e) {
+                throw new Error();
+            }
+        }
+        NULL_OPACITY_INDEX_DATA = bout.toByteArray();
+    }
+
+    private static final ByteArrayTag NULL_OPACITY_INDEX = new ByteArrayTag(NULL_OPACITY_INDEX_DATA);
 
     private final ExecutorService fixingExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() + 1);
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
     private final AtomicInteger submittedFix = new AtomicInteger();
     private final AtomicInteger submittedIo = new AtomicInteger();
     private final AtomicInteger saved = new AtomicInteger();
-    private final Map<Path, SaveSection3D> savesToClose = new HashMap<>();
+    private final Map<Path, SaveSection<?, ?>> savesToClose = new HashMap<>();
 
     private final Output output = new Output();
 
@@ -82,7 +97,8 @@ public class Main {
             System.out.print(ansi().eraseScreen(Erase.ALL).cursor(0, 0));
 
             output.printStatus("Scanning worlds...");
-            fixWorld(args[1]);
+            Path path = Paths.get(args[1]).toAbsolutePath();
+            fixWorld(path.toString(), path.resolveSibling(path.getFileName() + "_fixed").toString());
             output.printStatus("Waiting for chunk fixes...");
             output.printInfo("");
 
@@ -117,26 +133,43 @@ public class Main {
 
     }
 
-    private void fixWorld(String worldLocation) throws IOException {
-        Path path = Paths.get(worldLocation);
-        String dimName = path.getFileName().toString();
+    private void fixWorld(String worldLocation, String outputWorld) throws IOException {
+        Path inPath = Paths.get(worldLocation);
+        Path outPath = Paths.get(outputWorld);
+
+        String dimName = inPath.getFileName().toString();
         output.printInfo("Scheduling fixes in dimension " + dimName);
-        Path part2d = path.resolve("region2d");
-        Files.createDirectories(part2d);
 
-        Path part3d = path.resolve("region3d");
-        Files.createDirectories(part3d);
-        SaveSection3D save = SaveSection3D.createAt(part3d);
-        SaveSection2D save2d = SaveSection2D.createAt(part2d);
+        Path part2dIn = inPath.resolve("region2d");
+        Files.createDirectories(part2dIn);
 
-        fixSave(save, save2d);
-        savesToClose.put(path, save);
-        try (Stream<Path> stream = Files.list(path)) {
+        Path part3dIn = inPath.resolve("region3d");
+        Files.createDirectories(part3dIn);
+
+        Path part2dOut = outPath.resolve("region2d");
+        Files.createDirectories(part2dOut);
+
+        Path part3dOut = outPath.resolve("region3d");
+        Files.createDirectories(part3dOut);
+
+        SaveSection3D save3dIn = SaveSection3D.createAt(part3dIn);
+        SaveSection2D save2dIn = SaveSection2D.createAt(part2dIn);
+
+        SaveSection3D save3dOut = SaveSection3D.createAt(part3dOut);
+        SaveSection2D save2dOut = SaveSection2D.createAt(part2dOut);
+
+        fixSave(save3dIn, save3dOut, save2dIn, save2dOut);
+
+        savesToClose.put(inPath.resolveSibling(inPath.getFileName() + "_3d_in"), save3dIn);
+        savesToClose.put(inPath.resolveSibling(inPath.getFileName() + "_2d_in"), save2dIn);
+        savesToClose.put(outPath.resolveSibling(inPath.getFileName() + "_3d_out"), save3dOut);
+        savesToClose.put(outPath.resolveSibling(inPath.getFileName() + "_2d_out"), save2dOut);
+        try (Stream<Path> stream = Files.list(inPath)) {
             Set<Path> dimensions =
                     stream.filter(p -> p.getFileName().toString().startsWith("DIM") && Files.isDirectory(p)).collect(Collectors.toSet());
             for (Path dim : dimensions) {
                 try {
-                    fixWorld(dim.toString());
+                    fixWorld(dim.toString(), outPath.resolve(inPath.relativize(dim)).toString());
                 } catch (Throwable t) {
                     output.printError("Could not fix dimension: " + dim.getFileName().toString(), t);
                 }
@@ -144,14 +177,14 @@ public class Main {
         }
     }
 
-    private void fixSave(SaveSection3D save, SaveSection2D save2d) throws IOException {
-        save2d.forAllKeys(location -> {
+    private void fixSave(SaveSection3D save3dIn, SaveSection3D save3dOut, SaveSection2D save2dIn, SaveSection2D save2dOut) throws IOException {
+        save2dIn.forAllKeys(location -> {
             submittedFix.incrementAndGet();
             fixingExecutor.submit(() -> {
                 try {
                     ByteBuffer buf;
                     try {
-                        buf = save2d.load(location, true).orElse(null);
+                        buf = save2dIn.load(location, true).orElse(null);
                     } catch (Throwable t) {
                         output.printError("Error loading column data " + location + ", skipping...", t);
                         return;
@@ -166,7 +199,7 @@ public class Main {
                     submittedIo.incrementAndGet();
                     ioExecutor.submit(() -> {
                         try {
-                            save2d.save(location, newBuf);
+                            save2dOut.save(location, newBuf);
                         } catch (IOException e) {
                             output.printError("An error occurred while saving column at " + location, e);
                         }
@@ -178,13 +211,13 @@ public class Main {
                 }
             });
         });
-        save.forAllKeys(location -> {
+        save3dIn.forAllKeys(location -> {
             submittedFix.incrementAndGet();
             fixingExecutor.submit(() -> {
                 try {
                     ByteBuffer buf;
                     try {
-                        buf = save.load(location, true).orElse(null);
+                        buf = save3dIn.load(location, true).orElse(null);
                     } catch (Throwable t) {
                         output.printError("Error loading chunk data " + location + ", skipping...", t);
                         return;
@@ -200,7 +233,7 @@ public class Main {
                     submittedIo.incrementAndGet();
                     ioExecutor.submit(() -> {
                         try {
-                            save.save(location, newBuf);
+                            save3dOut.save(location, newBuf);
                         } catch (IOException e) {
                             output.printError("An error occurred while saving chunk at " + location, e);
                         }
@@ -246,9 +279,7 @@ public class Main {
             buf.flip();
             return buf;
         }
-        if (level.contains("OpacityIndex")) {
-            level.remove("OpacityIndex");
-        }
+        level.put("OpacityIndex", NULL_OPACITY_INDEX);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (BufferedOutputStream stream = new BufferedOutputStream(out)) {
             writeCompressed(tag, stream);
