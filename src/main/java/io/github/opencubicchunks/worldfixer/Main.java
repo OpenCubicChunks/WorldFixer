@@ -31,9 +31,13 @@ import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -61,8 +65,10 @@ public class Main {
 
     private static final ByteArrayTag NULL_OPACITY_INDEX = new ByteArrayTag(NULL_OPACITY_INDEX_DATA);
 
-    private final ExecutorService fixingExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() + 1);
-    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
+
+    private static final int THREADS = Runtime.getRuntime().availableProcessors() + 1;
+    private final ExecutorService fixingExecutor = new ThreadPoolExecutor(THREADS, THREADS, 1000L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256*1024));
+    private final ExecutorService ioExecutor = new ThreadPoolExecutor(1, 1, 1000L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256*1024));
     private final AtomicInteger submittedFix = new AtomicInteger();
     private final AtomicInteger submittedIo = new AtomicInteger();
     private final AtomicInteger saved = new AtomicInteger();
@@ -70,12 +76,26 @@ public class Main {
 
     private final Output output = new Output();
 
+    {
+        RejectedExecutionHandler handler = (r, executor) -> {
+            try {
+                if (!executor.isShutdown()) {
+                    executor.getQueue().put(r);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RejectedExecutionException("Executor was interrupted while the task was waiting to put on work queue", e);
+            }
+        };
+        ((ThreadPoolExecutor)fixingExecutor).setRejectedExecutionHandler(handler);
+        ((ThreadPoolExecutor)ioExecutor).setRejectedExecutionHandler(handler);
+    }
     public static void main(String... args) throws IOException, InterruptedException {
         new Main().start(args);
     }
 
     private void start(String... args) throws IOException, InterruptedException {
-        if (args.length == 0 || args[0].equals("-h") || args[0].equals("--help") || args[0].equals("-?")) {
+        if (args.length != 0 && (args[0].equals("-h") || args[0].equals("--help") || args[0].equals("-?"))) {
             printHelp();
             return;
         }
@@ -86,6 +106,10 @@ public class Main {
             output.jansi = !System.getProperty("os.name").startsWith("Windows") || !Ansi.isEnabled();
         } else {
             output.jansi = ansi.equalsIgnoreCase("true");
+        }
+        // TODO: handle this properly
+        if (args.length == 0) {
+            args = new String[]{"-w", "world"};
         }
         if (args[0].equals("-w") || args[0].equals("--world")) {
             if (args.length != 2) {
