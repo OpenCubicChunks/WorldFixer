@@ -22,10 +22,10 @@ import java.util.function.Supplier;
  *
  * In all cases, the dynamically updated lines update no more than once every 200ms (outputTimer).
  */
-class Output {
+public class CliOutput implements StatusHandler {
 
     private final int outputTimer = 800;
-    boolean jansi = false;
+    static boolean jansi = false;
     private volatile boolean lastNewline = true;
     private String action1 = "";
     private String action2 = "";
@@ -33,10 +33,10 @@ class Output {
 
     private volatile long lastProgressPrintTime = System.currentTimeMillis();
     private volatile long lastChunkInfoPrintTime = System.currentTimeMillis();
-    boolean printChunkInfo = false;
+    static boolean printChunkInfo = false;
 
-    void printStatus(String txt) {
-        synchronized (Output.class) {
+    @Override public void status(String txt) {
+        synchronized (CliOutput.class) {
             if (!jansi) {
                 noColorPrintln(txt);
                 return;
@@ -76,8 +76,8 @@ class Output {
         lastNewline = false;
     }
 
-    void printInfo(String txt) {
-        synchronized (Output.class) {
+    @Override public void info(String txt) {
+        synchronized (CliOutput.class) {
             if (!jansi) {
                 noColorPrintln(txt);
                 return;
@@ -95,7 +95,7 @@ class Output {
     }
 
 
-    void printChunkInfo(Supplier<String> info) {
+    @Override public void chunkInfo(Supplier<String> info) {
         if (!printChunkInfo) {
             return;
         }
@@ -104,7 +104,7 @@ class Output {
         }
         long time = System.currentTimeMillis();
         if (Math.abs(time - lastChunkInfoPrintTime) > outputTimer) {
-            synchronized (Output.class) {
+            synchronized (CliOutput.class) {
                 String txt = info.get();
                 txt = txt.substring(0, Math.min(txt.length(), 80));
 
@@ -121,16 +121,16 @@ class Output {
         }
     }
 
-    void printProgress(Supplier<String> progress, boolean finalPrint) {
+    @Override public void progress(Supplier<Double> progressString, Supplier<String> progress, boolean isDone) {
         long time = System.currentTimeMillis();
-        if (finalPrint || Math.abs(time - lastProgressPrintTime) > outputTimer) {
-            synchronized (Output.class) {
+        if (isDone || Math.abs(time - lastProgressPrintTime) > outputTimer) {
+            synchronized (CliOutput.class) {
                 if (!jansi) {
                     noColorPrint(progress.get());
                     lastProgressPrintTime = System.currentTimeMillis();
                     return;
                 }
-                String txt = progress.get();
+                String txt = '\r' + progress.get();
                 txt = txt.substring(0, Math.min(txt.length(), 80));
 
                 if (printChunkInfo) {
@@ -155,8 +155,8 @@ class Output {
         }
     }
 
-    void printError(String msg, Throwable exception) {
-        synchronized (Output.class) {
+    @Override public void error(String msg, Throwable exception) {
+        synchronized (CliOutput.class) {
             if (!jansi) {
                 noColorPrintln(msg, exception);
                 return;
@@ -174,14 +174,14 @@ class Output {
                 .a("\n\n")
                 .cursorUpLine(2));
 
-            printStatus(action1);
-            printInfo(action2);
-            printProgress(() -> lastProgress, true);
+            status(action1);
+            info(action2);
+            progress(() -> 0.0, () -> lastProgress, true);
         }
     }
 
-    public void printWarning(String msg) {
-        synchronized (Output.class) {
+    @Override public void warning(String msg) {
+        synchronized (CliOutput.class) {
             if (!jansi) {
                 noColorPrintln(msg);
                 return;
@@ -193,9 +193,9 @@ class Output {
                 .cursorUpLine(2)
                 .cursorToColumn(0));
 
-            printStatus(action1);
-            printInfo(action2);
-            printProgress(() -> lastProgress, true);
+            status(action1);
+            info(action2);
+            progress(() -> 0.0, () -> lastProgress, true);
         }
     }
 
