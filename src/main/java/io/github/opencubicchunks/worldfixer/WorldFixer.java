@@ -307,7 +307,7 @@ public class WorldFixer {
         //lgtm [java/input-resource-leak]
         CompoundTag tag = readCompressed(buf);
         if (tag.getByte("v", (byte) 0) != 1) {
-            statusHandler.warning("Cube at " + loc + " has no version " + tag.getInt("v", 0) + " but expected 1, skipping...");
+            statusHandler.warning("Cube at " + loc + " has version " + tag.getInt("v", 0) + " but expected 1, skipping...");
             return null;
         }
         CompoundTag level = tag.getCompound("Level", NULL_TAG);
@@ -328,7 +328,7 @@ public class WorldFixer {
         //lgtm [java/input-resource-leak]
         CompoundTag tag = readCompressed(buf);
         if (tag.getByte("v", (byte) 0) != 1) {
-            statusHandler.warning("Column at " + loc + " has no version " + tag.getInt("v", 0) + " but expected 1, skipping...");
+            statusHandler.warning("Column at " + loc + " has version " + tag.getInt("v", 0) + " but expected 1, skipping...");
             return null;
         }
         CompoundTag level = tag.getCompound("Level", NULL_TAG);
