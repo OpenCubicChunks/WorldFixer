@@ -306,13 +306,14 @@ public class WorldFixer {
     private ByteBuffer fixBuffer(StatusHandler statusHandler, EntryLocation3D loc, ByteBuffer buf) throws IOException {
         //lgtm [java/input-resource-leak]
         CompoundTag tag = readCompressed(buf);
-        if (tag.getByte("v", (byte) 0) != 1) {
-            statusHandler.warning("Cube at " + loc + " has version " + tag.getInt("v", 0) + " but expected 1, skipping...");
-            return null;
-        }
+
         CompoundTag level = tag.getCompound("Level", NULL_TAG);
         if (level == NULL_TAG) {
             statusHandler.warning("Cube at " + loc + " has no Level tag! Skipping...");
+            return null;
+        }
+        if (level.getByte("v", (byte) 0) != 1) {
+            statusHandler.warning("Cube at " + loc + " has version " + level.getInt("v", 0) + " but expected 1, skipping...");
             return null;
         }
         level.putBoolean("isSurfaceTracked", false);
@@ -327,13 +328,13 @@ public class WorldFixer {
     private ByteBuffer fix2dBuffer(StatusHandler statusHandler, EntryLocation2D loc, ByteBuffer buf) throws IOException {
         //lgtm [java/input-resource-leak]
         CompoundTag tag = readCompressed(buf);
-        if (tag.getByte("v", (byte) 0) != 1) {
-            statusHandler.warning("Column at " + loc + " has version " + tag.getInt("v", 0) + " but expected 1, skipping...");
-            return null;
-        }
         CompoundTag level = tag.getCompound("Level", NULL_TAG);
         if (level == NULL_TAG) {
             statusHandler.warning("Column at " + loc + " has no Level tag! Skipping...");
+            return null;
+        }
+        if (level.getByte("v", (byte) 0) != 1) {
+            statusHandler.warning("Column at " + loc + " has version " + level.getInt("v", 0) + " but expected 1, skipping...");
             return null;
         }
         level.put("OpacityIndex", NULL_OPACITY_INDEX);
