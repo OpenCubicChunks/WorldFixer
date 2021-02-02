@@ -356,7 +356,7 @@ public class WorldFixer {
     }
 
     private void showProgress(StatusHandler statusHandler, boolean isDone) {
-        statusHandler.progress(() -> saved.get() / (double) submittedFix.get(), () -> isDone ? "DONE" : String.format("%d/%d/%d/%d (%.2f%%)",
+        statusHandler.progress(() -> isDone ? 1.0 : (saved.get() / (double) totalCount.get()), () -> isDone ? "DONE" : String.format("%d/%d/%d/%d (%.2f%%)",
             saved.get(), submittedIo.get(), submittedFix.get(), totalCount.get(), 100 * saved.get() / (double) totalCount.get()), isDone);
     }
 

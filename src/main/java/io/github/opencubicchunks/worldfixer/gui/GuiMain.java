@@ -5,33 +5,24 @@ import io.github.opencubicchunks.worldfixer.StatusHandler;
 import io.github.opencubicchunks.worldfixer.Utils;
 import io.github.opencubicchunks.worldfixer.WorldFixer;
 
-import java.awt.BorderLayout;
-import java.awt.Dimension;
-import java.awt.EventQueue;
-import java.awt.GridBagConstraints;
-import java.awt.GridBagLayout;
+import java.awt.*;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.function.Supplier;
 
-import javax.swing.JButton;
-import javax.swing.JFileChooser;
-import javax.swing.JFrame;
-import javax.swing.JLabel;
-import javax.swing.JOptionPane;
-import javax.swing.JPanel;
-import javax.swing.JProgressBar;
-import javax.swing.JTextField;
-import javax.swing.SwingConstants;
-import javax.swing.UIManager;
-import javax.swing.UnsupportedLookAndFeelException;
-import javax.swing.WindowConstants;
+import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.SimpleAttributeSet;
+import javax.swing.text.StyleConstants;
 
 public class GuiMain extends JFrame {
 
@@ -50,6 +41,7 @@ public class GuiMain extends JFrame {
 
     private JTextField srcPathField;
     private JTextField dstPathField;
+    private JTextPane logOutput;
     private boolean isFixing;
 
     public GuiMain() {
@@ -82,6 +74,10 @@ public class GuiMain extends JFrame {
         // hack to make the layout not remove their space
         statusLabel = new JLabel(" ");
         chunkStatusLabel = new JLabel(" ");
+        logOutput = new JTextPane();
+        logOutput.setEditable(false);
+        logOutput.setMinimumSize(new Dimension(100, 300));
+        logOutput.setPreferredSize(logOutput.getMinimumSize());
 
         GridBagConstraints gbc = new GridBagConstraints();
 
@@ -120,6 +116,18 @@ public class GuiMain extends JFrame {
         gbc.weightx = 1;
         gbc.fill = GridBagConstraints.HORIZONTAL;
         mainPanel.add(progressBar, gbc);
+
+        JScrollPane scroll = new JScrollPane(logOutput);
+        scroll.setMinimumSize(new Dimension(100, 300));
+        scroll.setPreferredSize(logOutput.getMinimumSize());
+
+        gbc.gridx = 0;
+        gbc.gridy = 4;
+        gbc.gridwidth = 2;
+        gbc.weightx = 1;
+        gbc.weighty = 1;
+        gbc.fill = GridBagConstraints.BOTH;
+        mainPanel.add(scroll, gbc);
 
         root.add(mainPanel, BorderLayout.CENTER);
         root.setBorder(new EmptyBorder(10, 10, 10, 10));
@@ -277,6 +285,7 @@ public class GuiMain extends JFrame {
         isFixing = true;
         updateFixBtn();
 
+        logOutput.setText("");
         Thread thread = new Thread(() -> {
             try {
                 new WorldFixer().fixWorld(srcPath.toString(), dstPath.toString(), new GuiStatusHandler());
@@ -300,12 +309,39 @@ public class GuiMain extends JFrame {
         private volatile String lastInfo = " ";
         private volatile String lastChunkInfo = " ";
 
+        private SimpleAttributeSet errorAttrs;
+        private SimpleAttributeSet warnAttrs;
+        {
+            errorAttrs = new SimpleAttributeSet();
+            errorAttrs.addAttribute(StyleConstants.Foreground, Color.RED);
+            warnAttrs = new SimpleAttributeSet();
+            warnAttrs.addAttribute(StyleConstants.Foreground, Color.ORANGE);
+        }
+
         @Override public void status(String txt) {
             cli.status(txt);
+            if (!txt.isEmpty()) {
+                EventQueue.invokeLater(() -> {
+                    try {
+                        logOutput.getDocument().insertString(logOutput.getDocument().getLength(), txt + '\n', null);
+                    } catch (BadLocationException e) {
+                        throw new Error(e);
+                    }
+                });
+            }
         }
 
         @Override public void info(String txt) {
             cli.info(txt);
+            if (!txt.isEmpty()) {
+                EventQueue.invokeLater(() -> {
+                    try {
+                        logOutput.getDocument().insertString(logOutput.getDocument().getLength(), txt + '\n', null);
+                    } catch (BadLocationException e) {
+                        throw new Error(e);
+                    }
+                });
+            }
             this.lastInfo = txt.isEmpty() ? " " : txt;
             if (System.currentTimeMillis() - lastUpdate > UPDATE_DELTA) {
                 lastUpdate = System.currentTimeMillis();
@@ -355,10 +391,30 @@ public class GuiMain extends JFrame {
 
         @Override public void error(String msg, Throwable exception) {
             cli.error(msg, exception);
+            EventQueue.invokeLater(() -> {
+                StringWriter sw = new StringWriter(1000);
+                if (!msg.isEmpty()) {
+                    sw.append(msg).append('\n');
+                }
+                exception.printStackTrace(new PrintWriter(sw));
+                try {
+                    logOutput.getDocument().insertString(logOutput.getDocument().getLength(), sw.toString(), errorAttrs);
+                } catch (BadLocationException e) {
+                    throw new Error(e);
+                }
+            });
+
         }
 
         @Override public void warning(String msg) {
             cli.warning(msg);
+            EventQueue.invokeLater(() -> {
+                try {
+                    logOutput.getDocument().insertString(logOutput.getDocument().getLength(), msg + '\n', warnAttrs);
+                } catch (BadLocationException e) {
+                    throw new Error(e);
+                }
+            });
         }
     }
 }
