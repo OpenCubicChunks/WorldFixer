@@ -7,6 +7,8 @@ import cubicchunks.regionlib.impl.EntryLocation2D;
 import cubicchunks.regionlib.impl.EntryLocation3D;
 import cubicchunks.regionlib.impl.save.SaveSection2D;
 import cubicchunks.regionlib.impl.save.SaveSection3D;
+import cubicchunks.regionlib.lib.ExtRegion;
+import cubicchunks.regionlib.lib.provider.SimpleRegionProvider;
 import net.kyori.nbt.ByteArrayTag;
 import net.kyori.nbt.CompoundTag;
 import net.kyori.nbt.TagIO;
@@ -25,6 +27,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -146,8 +149,26 @@ public class WorldFixer {
         Path part3dIn = inPath.resolve("region3d");
         Files.createDirectories(part3dIn);
 
-        SaveSection3D save3dIn = SaveSection3D.createAt(part3dIn);
-        SaveSection2D save2dIn = SaveSection2D.createAt(part2dIn);
+        SaveSection3D save3dIn = new SaveSection3D(
+                new RegionCache<>(
+                        SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3dIn, 512)
+                ),
+                new RegionCache<>(
+                        new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dIn,
+                                (keyProvider, regionKey) -> new ExtRegion<>(part3dIn, Collections.emptyList(), keyProvider, regionKey),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                        )
+                ));
+        SaveSection2D save2dIn = new SaveSection2D(
+                new RegionCache<>(
+                        SimpleRegionProvider.createDefault(new EntryLocation2D.Provider(), part2dIn, 512)
+                ),
+                new RegionCache<>(
+                        new SimpleRegionProvider<>(new EntryLocation2D.Provider(), part2dIn,
+                                (keyProvider, regionKey) -> new ExtRegion<>(part2dIn, Collections.emptyList(), keyProvider, regionKey),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                        )
+                ));
 
         doCountChunks(save3dIn, save2dIn, statusHandler);
 
@@ -199,11 +220,47 @@ public class WorldFixer {
         Path part3dOut = outPath.resolve("region3d");
         Files.createDirectories(part3dOut);
 
-        SaveSection3D save3dIn = SaveSection3D.createAt(part3dIn);
-        SaveSection2D save2dIn = SaveSection2D.createAt(part2dIn);
+        SaveSection3D save3dIn = new SaveSection3D(
+                new RegionCache<>(
+                        SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3dIn, 512)
+                ),
+                new RegionCache<>(
+                        new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dIn,
+                                (keyProvider, regionKey) -> new ExtRegion<>(part3dIn, Collections.emptyList(), keyProvider, regionKey),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                        )
+                ));
+        SaveSection2D save2dIn = new SaveSection2D(
+                new RegionCache<>(
+                        SimpleRegionProvider.createDefault(new EntryLocation2D.Provider(), part2dIn, 512)
+                ),
+                new RegionCache<>(
+                        new SimpleRegionProvider<>(new EntryLocation2D.Provider(), part2dIn,
+                                (keyProvider, regionKey) -> new ExtRegion<>(part2dIn, Collections.emptyList(), keyProvider, regionKey),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                        )
+                ));
 
-        SaveSection3D save3dOut = SaveSection3D.createAt(part3dOut);
-        SaveSection2D save2dOut = SaveSection2D.createAt(part2dOut);
+        SaveSection3D save3dOut = new SaveSection3D(
+                new RegionCache<>(
+                        SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3dOut, 512)
+                ),
+                new RegionCache<>(
+                        new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dOut,
+                                (keyProvider, regionKey) -> new ExtRegion<>(part3dOut, Collections.emptyList(), keyProvider, regionKey),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                        )
+                ));
+        SaveSection2D save2dOut = new SaveSection2D(
+                new RegionCache<>(
+                        SimpleRegionProvider.createDefault(new EntryLocation2D.Provider(), part2dOut, 512)
+                ),
+                new RegionCache<>(
+                        new SimpleRegionProvider<>(new EntryLocation2D.Provider(), part2dOut,
+                                (keyProvider, regionKey) -> new ExtRegion<>(part2dOut, Collections.emptyList(), keyProvider, regionKey),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                        )
+                ));
 
         fixSave(save3dIn, save3dOut, save2dIn, save2dOut, statusHandler);
 
