@@ -422,10 +422,11 @@ public class GuiMain extends JFrame {
             lastErrorTime = System.nanoTime();
             if (skippedErrors != 0) {
                 cli.warning("Skipped " + skippedErrors + " errors due to rate limit");
+                int skipped = skippedErrors;
                 EventQueue.invokeLater(() -> {
                     try {
                         logOutput.getDocument().insertString(logOutput.getDocument().getLength(),
-                                "Skipped " + skippedErrors + " errors due to rate limit\n", warnAttrs);
+                                "Skipped " + skipped + " errors due to rate limit\n", warnAttrs);
                         checkLogLength();
                     } catch (BadLocationException e) {
                         throw new Error(e);
