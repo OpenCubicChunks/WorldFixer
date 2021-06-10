@@ -96,7 +96,16 @@ public class WorldFixer {
 
         statusHandler.status("Scanning worlds (counting chunks)...");
         Path path = Paths.get(world).toAbsolutePath();
-        countChunks(path.toString(), statusHandler);
+        Thread counting = new Thread(() -> {
+            try {
+                countChunks(path.toString(), statusHandler);
+            } catch (IOException e) {
+                e.printStackTrace();
+                throw new RuntimeException(e);
+            }
+        }, "Chunk Counting");
+        counting.start();
+
         savesToClose.forEach((p, s) -> {
             try {
                 statusHandler.info("Closing dimension " + p.getFileName().toString());
@@ -123,6 +132,7 @@ public class WorldFixer {
             statusHandler.warning("IO EXECUTOR NOT TERMINATED AFTER TERMINATION!");
         }
         showProgress(statusHandler, true);
+        counting.join();
         statusHandler.status("Closing saves...");
         savesToClose.forEach((p, s) -> {
             try {

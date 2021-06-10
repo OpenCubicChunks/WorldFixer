@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import javax.swing.JButton;
@@ -317,7 +318,7 @@ public class GuiMain extends JFrame {
 
     private class GuiStatusHandler implements StatusHandler {
 
-        private final int MAX_LOG_LENGTH = Integer.parseInt(System.getProperty("worldfixer.maxlogoutput", String.valueOf(1024*1024*4)));
+        private final int MAX_LOG_LENGTH = Integer.parseInt(System.getProperty("worldfixer.maxlogoutput", String.valueOf(1024*128)));
 
         private final CliOutput cli = new CliOutput();
 
@@ -327,6 +328,9 @@ public class GuiMain extends JFrame {
         private volatile String lastProgressString;
         private volatile String lastInfo = " ";
         private volatile String lastChunkInfo = " ";
+        private volatile boolean rateLimitErrors = false;
+        private volatile long lastErrorTime = 0;
+        private volatile int skippedErrors = 0;
 
         private SimpleAttributeSet errorAttrs;
         private SimpleAttributeSet warnAttrs;
@@ -411,6 +415,25 @@ public class GuiMain extends JFrame {
         }
 
         @Override public void error(String msg, Throwable exception) {
+            if (rateLimitErrors && (System.nanoTime() - lastErrorTime) < TimeUnit.MILLISECONDS.toNanos(500)) {
+                skippedErrors++;
+                return;
+            }
+            lastErrorTime = System.nanoTime();
+            if (skippedErrors != 0) {
+                cli.warning("Skipped " + skippedErrors + " errors due to rate limit");
+                EventQueue.invokeLater(() -> {
+                    try {
+                        logOutput.getDocument().insertString(logOutput.getDocument().getLength(),
+                                "Skipped " + skippedErrors + " errors due to rate limit\n", warnAttrs);
+                        checkLogLength();
+                    } catch (BadLocationException e) {
+                        throw new Error(e);
+                    }
+                });
+                skippedErrors = 0;
+                return;
+            }
             cli.error(msg, exception);
             EventQueue.invokeLater(() -> {
                 StringWriter sw = new StringWriter(1000);
@@ -442,6 +465,7 @@ public class GuiMain extends JFrame {
 
         private void checkLogLength() {
             if (logOutput.getDocument().getLength() > MAX_LOG_LENGTH) {
+                rateLimitErrors = true;
                 try {
                     logOutput.getDocument().remove(0, MAX_LOG_LENGTH / 8);
                 } catch (BadLocationException e) {
