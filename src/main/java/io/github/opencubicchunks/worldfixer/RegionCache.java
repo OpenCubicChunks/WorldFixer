@@ -132,6 +132,9 @@ public class RegionCache <K extends IKey<K>> implements IRegionProvider<K> {
             region = (IRegion<K>) regionLocationToRegion.get(sharedKey);
             if (region == null) {
                 region = sourceProvider.getExistingRegion(location).orElse(null);
+                if (region != null) {
+                    regionLocationToRegion.put(sharedKey, region);
+                }
                 if (region == null && canCreate) {
                     createNew = true;
                 }

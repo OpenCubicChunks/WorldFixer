@@ -1,12 +1,11 @@
 package io.github.opencubicchunks.worldfixer.gui;
 
-import io.github.opencubicchunks.worldfixer.CliOutput;
-import io.github.opencubicchunks.worldfixer.StatusHandler;
-import io.github.opencubicchunks.worldfixer.Utils;
-import io.github.opencubicchunks.worldfixer.WorldFixer;
-
-import java.awt.*;
-import java.io.ByteArrayOutputStream;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.EventQueue;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -16,13 +15,31 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.function.Supplier;
 
-import javax.swing.*;
+import javax.swing.JButton;
+import javax.swing.JFileChooser;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JProgressBar;
+import javax.swing.JScrollPane;
+import javax.swing.JTextField;
+import javax.swing.JTextPane;
+import javax.swing.SwingConstants;
+import javax.swing.UIManager;
+import javax.swing.UnsupportedLookAndFeelException;
+import javax.swing.WindowConstants;
 import javax.swing.border.EmptyBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.SimpleAttributeSet;
 import javax.swing.text.StyleConstants;
+
+import io.github.opencubicchunks.worldfixer.CliOutput;
+import io.github.opencubicchunks.worldfixer.StatusHandler;
+import io.github.opencubicchunks.worldfixer.Utils;
+import io.github.opencubicchunks.worldfixer.WorldFixer;
 
 public class GuiMain extends JFrame {
 
@@ -300,6 +317,8 @@ public class GuiMain extends JFrame {
 
     private class GuiStatusHandler implements StatusHandler {
 
+        private final int MAX_LOG_LENGTH = Integer.parseInt(System.getProperty("worldfixer.maxlogoutput", String.valueOf(1024*1024*4)));
+
         private final CliOutput cli = new CliOutput();
 
         private static final long UPDATE_DELTA = 200;
@@ -324,6 +343,7 @@ public class GuiMain extends JFrame {
                 EventQueue.invokeLater(() -> {
                     try {
                         logOutput.getDocument().insertString(logOutput.getDocument().getLength(), txt + '\n', null);
+                        checkLogLength();
                     } catch (BadLocationException e) {
                         throw new Error(e);
                     }
@@ -337,6 +357,7 @@ public class GuiMain extends JFrame {
                 EventQueue.invokeLater(() -> {
                     try {
                         logOutput.getDocument().insertString(logOutput.getDocument().getLength(), txt + '\n', null);
+                        checkLogLength();
                     } catch (BadLocationException e) {
                         throw new Error(e);
                     }
@@ -399,6 +420,7 @@ public class GuiMain extends JFrame {
                 exception.printStackTrace(new PrintWriter(sw));
                 try {
                     logOutput.getDocument().insertString(logOutput.getDocument().getLength(), sw.toString(), errorAttrs);
+                    checkLogLength();
                 } catch (BadLocationException e) {
                     throw new Error(e);
                 }
@@ -411,10 +433,21 @@ public class GuiMain extends JFrame {
             EventQueue.invokeLater(() -> {
                 try {
                     logOutput.getDocument().insertString(logOutput.getDocument().getLength(), msg + '\n', warnAttrs);
+                    checkLogLength();
                 } catch (BadLocationException e) {
                     throw new Error(e);
                 }
             });
+        }
+
+        private void checkLogLength() {
+            if (logOutput.getDocument().getLength() > MAX_LOG_LENGTH) {
+                try {
+                    logOutput.getDocument().remove(0, MAX_LOG_LENGTH / 8);
+                } catch (BadLocationException e) {
+                    throw new Error();
+                }
+            }
         }
     }
 }
