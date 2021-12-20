@@ -30,12 +30,17 @@ import cubicchunks.regionlib.api.region.key.RegionKey;
 import cubicchunks.regionlib.util.CheckedBiConsumer;
 import cubicchunks.regionlib.util.CheckedConsumer;
 import cubicchunks.regionlib.util.CheckedFunction;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -45,11 +50,14 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class RWLockingCachedRegionProvider<K extends IKey<K>> implements IRegionProvider<K> {
 
+    private static final int CACHE_SIZE = Integer.parseInt(System.getProperty("worldfixer.regionCacheSize",
+            (16 * WorldFixer.PROCESSOR_COUNT) + ""));
     private final IRegionProvider<K> sourceProvider;
+    private final Executor closingExecutor;
 
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
     private final Map<RegionKey, IRegion<?>> regionLocationToRegion = new ConcurrentHashMap<>(512);
-    private final int maxCacheSize = 4 * Runtime.getRuntime().availableProcessors();
+    private final int maxCacheSize = CACHE_SIZE;
 
     private boolean closed;
 
@@ -58,8 +66,9 @@ public class RWLockingCachedRegionProvider<K extends IKey<K>> implements IRegion
      *
      * @param sourceProvider provider used as source of regions
      */
-    public RWLockingCachedRegionProvider(IRegionProvider<K> sourceProvider) {
+    public RWLockingCachedRegionProvider(IRegionProvider<K> sourceProvider, @Nullable Executor closingExecutor) {
         this.sourceProvider = sourceProvider;
+        this.closingExecutor = closingExecutor == null ? Runnable::run : closingExecutor;
     }
 
     @Override
@@ -237,8 +246,26 @@ public class RWLockingCachedRegionProvider<K extends IKey<K>> implements IRegion
         lock.writeLock().lock();
         try {
             Iterator<IRegion<?>> it = regionLocationToRegion.values().iterator();
+            CompletableFuture<?> future = null;
             while (it.hasNext()) {
-                it.next().close();
+                IRegion<?> next = it.next();
+                CompletableFuture<?> newFuture = CompletableFuture.runAsync(() -> {
+                    try {
+                        next.close();
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                }, closingExecutor);
+                future = future == null ? newFuture : future.thenCombine(newFuture, (a, b) -> a);
+            }
+            try {
+                if (future != null) {
+                    future.get();
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (ExecutionException e) {
+                throw new IOException(e);
             }
             regionLocationToRegion.clear();
         } finally {

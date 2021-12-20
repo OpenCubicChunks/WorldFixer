@@ -319,11 +319,14 @@ public class GuiMain extends JFrame {
     private class GuiStatusHandler implements StatusHandler {
 
         private final int MAX_LOG_LENGTH = Integer.parseInt(System.getProperty("worldfixer.maxlogoutput", String.valueOf(1024*128)));
+        private final long UPDATE_DELTA = Integer.parseInt(System.getProperty("worldfixer.guiUpdateDeltaMillis", String.valueOf(200)));
 
         private final CliOutput cli = new CliOutput();
 
-        private static final long UPDATE_DELTA = 200;
-        private long lastUpdate = 0;
+        private long lastUpdateInfo = 0;
+        private long lastUpdateChunkInfo = 0;
+        private long lastUpdateProgress = 0;
+
         private volatile double lastProgressValue;
         private volatile String lastProgressString;
         private volatile String lastInfo = " ";
@@ -368,8 +371,8 @@ public class GuiMain extends JFrame {
                 });
             }
             this.lastInfo = txt.isEmpty() ? " " : txt;
-            if (System.currentTimeMillis() - lastUpdate > UPDATE_DELTA) {
-                lastUpdate = System.currentTimeMillis();
+            if (System.currentTimeMillis() - lastUpdateInfo > UPDATE_DELTA) {
+                lastUpdateInfo = System.currentTimeMillis();
                 EventQueue.invokeLater(this::updateProgress);
             }
         }
@@ -378,22 +381,24 @@ public class GuiMain extends JFrame {
             cli.chunkInfo(info);
             String lastChunkInfo = info.get();
             this.lastChunkInfo = lastChunkInfo.isEmpty() ? " " : lastChunkInfo;
-            if (System.currentTimeMillis() - lastUpdate > UPDATE_DELTA) {
-                lastUpdate = System.currentTimeMillis();
+            if (System.currentTimeMillis() - lastUpdateChunkInfo > UPDATE_DELTA) {
+                lastUpdateChunkInfo = System.currentTimeMillis();
                 EventQueue.invokeLater(this::updateProgress);
             }
         }
 
         @Override public void progress(Supplier<Double> progressValue, Supplier<String> progressString, boolean isDone) {
             cli.progress(progressValue, progressString, isDone);
-            this.lastProgressValue = progressValue.get();
-            this.lastProgressString = progressString.get();
             if (isDone) {
+                this.lastProgressValue = progressValue.get();
+                this.lastProgressString = progressString.get();
                 EventQueue.invokeLater(this::updateProgressDone);
                 return;
             }
-            if (System.currentTimeMillis() - lastUpdate > UPDATE_DELTA) {
-                lastUpdate = System.currentTimeMillis();
+            if (System.currentTimeMillis() - lastUpdateProgress > UPDATE_DELTA) {
+                this.lastProgressValue = progressValue.get();
+                this.lastProgressString = progressString.get();
+                lastUpdateProgress = System.currentTimeMillis();
                 EventQueue.invokeLater(this::updateProgress);
             }
         }

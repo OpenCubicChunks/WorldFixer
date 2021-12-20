@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.opencubicchunks"
-version = "1.9-SNAPSHOT"
+version = "1.10-SNAPSHOT"
 
 application {
     mainClassName = "io.github.opencubicchunks.worldfixer.Main"
