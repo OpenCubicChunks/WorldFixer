@@ -159,11 +159,14 @@ public class Utils {
         }
     }
 
-    public static boolean isEmpty(final Path directory) throws IOException {
-        if (!Files.exists(directory)) {
+    public static boolean isEmpty(final Path dirOrZip) throws IOException {
+        if (Files.exists(dirOrZip) && dirOrZip.getFileName().toString().endsWith(".zip")) {
+            return false; // existing zip = not empty
+        }
+        if (!Files.exists(dirOrZip)) {
             return true;
         }
-        try(DirectoryStream<Path> dirStream = Files.newDirectoryStream(directory)) {
+        try(DirectoryStream<Path> dirStream = Files.newDirectoryStream(dirOrZip)) {
             return !dirStream.iterator().hasNext();
         }
     }
@@ -176,6 +179,14 @@ public class Utils {
                 }
             }
         }
+    }
+
+    public static Path removeTrailingSlash(Path path) {
+        String pathStr = path.toString();
+        if (pathStr.endsWith("/")) {
+            pathStr = pathStr.substring(0, pathStr.length() - 1);
+        }
+        return path.getFileSystem().getPath(pathStr);
     }
 
     private enum OS {

@@ -1,7 +1,6 @@
 package io.github.opencubicchunks.worldfixer;
 
-import static org.fusesource.jansi.Ansi.ansi;
-
+import cubicchunks.regionlib.api.region.key.IKey;
 import cubicchunks.regionlib.api.storage.SaveSection;
 import cubicchunks.regionlib.impl.EntryLocation2D;
 import cubicchunks.regionlib.impl.EntryLocation3D;
@@ -13,35 +12,26 @@ import net.kyori.nbt.ByteArrayTag;
 import net.kyori.nbt.CompoundTag;
 import net.kyori.nbt.TagIO;
 import org.checkerframework.checker.nullness.qual.NonNull;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.fusesource.jansi.Ansi;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
+import java.net.URI;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.FileSystem;
+import java.nio.file.*;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.RejectedExecutionHandler;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
+
+import static org.fusesource.jansi.Ansi.ansi;
 
 public class WorldFixer {
     private static final CompoundTag NULL_TAG = new CompoundTag();
@@ -65,14 +55,43 @@ public class WorldFixer {
     private static final ByteArrayTag NULL_OPACITY_INDEX = new ByteArrayTag(NULL_OPACITY_INDEX_DATA);
 
 
-    private static final int THREADS = Runtime.getRuntime().availableProcessors() + 1;
-    private final ExecutorService fixingExecutor =
-        new ThreadPoolExecutor(THREADS, THREADS, 1000L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1024 * 1024));
-    private final ExecutorService ioExecutor = new ThreadPoolExecutor(1, 1, 1000L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256 * 1024));
+    private static final int READ_THREADS = Integer.parseInt(System.getProperty("worldfixer.readThreads", "1"));
+    private static final int FIX_THREADS = Integer.parseInt(System.getProperty("worldfixer.fixThreads",
+            (Runtime.getRuntime().availableProcessors() + 1) + ""));
+    private static final int WRITE_THREADS = Integer.parseInt(System.getProperty("worldfixer.writeThreads", "1"));
+    private final ArrayBlockingQueue<Runnable> readerQueue = new ArrayBlockingQueue<>(1024 * 1024);
+    private final ArrayBlockingQueue<Runnable> fixingQueue = new ArrayBlockingQueue<>(1024 * 1024);
+    private final ArrayBlockingQueue<Runnable> writeQueue = new ArrayBlockingQueue<>(256 * 1024);
+    private final AtomicInteger readThreads = new AtomicInteger(), fixThreads = new AtomicInteger(), writeThreads = new AtomicInteger();
+    private final ExecutorService readExecutor = new ThreadPoolExecutor(
+            READ_THREADS, READ_THREADS,
+            1000L, TimeUnit.MILLISECONDS, readerQueue,
+            runnable -> {
+                Thread t = new Thread(runnable);
+                t.setName("Reader thread " + readThreads.incrementAndGet());
+                return t;
+            });
+    private final ExecutorService fixingExecutor = new ThreadPoolExecutor(
+            FIX_THREADS, FIX_THREADS,
+            1000L, TimeUnit.MILLISECONDS, fixingQueue,
+            runnable -> {
+                Thread t = new Thread(runnable);
+                t.setName("Fix thread " + fixThreads.incrementAndGet());
+                return t;
+            });
+    private final ExecutorService writeExecutor = new ThreadPoolExecutor(
+            WRITE_THREADS, WRITE_THREADS,
+            1000L, TimeUnit.MILLISECONDS, writeQueue,
+            runnable -> {
+                Thread t = new Thread(runnable);
+                t.setName("Write thread " + writeThreads.incrementAndGet());
+                return t;
+            });
     private final AtomicInteger totalCount = new AtomicInteger();
-    private final AtomicInteger submittedFix = new AtomicInteger();
-    private final AtomicInteger submittedIo = new AtomicInteger();
-    private final AtomicInteger saved = new AtomicInteger();
+    private final AtomicInteger readingCount = new AtomicInteger();
+    private final AtomicInteger fixingCount = new AtomicInteger();
+    private final AtomicInteger writingCount = new AtomicInteger();
+    private final AtomicInteger doneCount = new AtomicInteger();
     private final Map<Path, SaveSection<?, ?>> savesToClose = new HashMap<>();
 
     {
@@ -86,19 +105,65 @@ public class WorldFixer {
                 throw new RejectedExecutionException("Executor was interrupted while the task was waiting to put on work queue", e);
             }
         };
+        ((ThreadPoolExecutor) readExecutor).setRejectedExecutionHandler(handler);
         ((ThreadPoolExecutor) fixingExecutor).setRejectedExecutionHandler(handler);
-        ((ThreadPoolExecutor) ioExecutor).setRejectedExecutionHandler(handler);
+        ((ThreadPoolExecutor) writeExecutor).setRejectedExecutionHandler(handler);
     }
 
     public void fixWorld(String world, String outputWorld, StatusHandler statusHandler) throws IOException,
         InterruptedException {
+
+        Path inWorld, outWorld;
+        FileSystem inFs = null, outFs = null;
+        if (world.endsWith(".zip")) {
+            inFs = FileSystems.newFileSystem(Paths.get(world), getClass().getClassLoader());
+            inWorld = findWorldIn(inFs.getPath("/"));
+        } else {
+            inWorld = Paths.get(world);
+        }
+        if (outputWorld.endsWith(".zip")) {
+            outFs = createZipFs(Paths.get(outputWorld));
+            outWorld = outFs.getPath("/");
+        } else {
+            outWorld = Paths.get(outputWorld);
+        }
+
+        try (FileSystem ignored = inFs; FileSystem ignored1 = outFs) {
+            fixWorld(inWorld, outWorld, statusHandler);
+        }
+    }
+
+    @Nullable private Path findWorldIn(Path path) throws IOException {
+        if (Files.exists(path.resolve("level.dat"))) {
+            return path;
+        }
+        try (Stream<Path> stream = Files.list(path)) {
+            for (Path o : stream.toArray(Path[]::new)) {
+                Path worldPath = findWorldIn(o);
+                if (worldPath != null) {
+                    return worldPath;
+                }
+            }
+            return null;
+        }
+    }
+
+    private FileSystem createZipFs(Path path) throws IOException {
+        Map<String, String> env = new HashMap<>();
+        env.put("create", "true");
+        URI uri = URI.create("jar:" + path.toUri());
+        return FileSystems.newFileSystem(uri, env);
+    }
+
+    private void fixWorld(Path world, Path outputWorld, StatusHandler statusHandler) throws IOException,
+            InterruptedException {
         System.out.print(ansi().eraseScreen(Ansi.Erase.ALL).cursor(0, 0));
 
         statusHandler.status("Scanning worlds (counting chunks)...");
-        Path path = Paths.get(world).toAbsolutePath();
+
         Thread counting = new Thread(() -> {
             try {
-                countChunks(path.toString(), statusHandler);
+                countChunks(world, statusHandler);
             } catch (IOException e) {
                 e.printStackTrace();
                 throw new RuntimeException(e);
@@ -115,20 +180,25 @@ public class WorldFixer {
             }
         });
         statusHandler.status("Scanning worlds (copying chunks)...");
-        beginFixing(path.toString(), outputWorld, statusHandler);
+        beginFixing(world, outputWorld, statusHandler);
 
         statusHandler.status("Waiting for chunk fixes...");
         statusHandler.info("");
 
+        readExecutor.shutdown();
+        readExecutor.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
+        if (!readExecutor.isTerminated()) {
+            statusHandler.warning("READING EXECUTOR NOT TERMINATED AFTER TERMINATION!");
+        }
         fixingExecutor.shutdown();
         fixingExecutor.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
         if (!fixingExecutor.isTerminated()) {
             statusHandler.warning("FIXING EXECUTOR NOT TERMINATED AFTER TERMINATION!");
         }
         statusHandler.status("Waiting to write save changes...");
-        ioExecutor.shutdown();
-        ioExecutor.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
-        if (!ioExecutor.isTerminated()) {
+        writeExecutor.shutdown();
+        writeExecutor.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
+        if (!writeExecutor.isTerminated()) {
             statusHandler.warning("IO EXECUTOR NOT TERMINATED AFTER TERMINATION!");
         }
         showProgress(statusHandler, true);
@@ -147,53 +217,67 @@ public class WorldFixer {
         System.out.println("\n\n");
     }
 
-    private void countChunks(String worldLocation, StatusHandler statusHandler) throws IOException {
-        Path inPath = Paths.get(worldLocation);
+    private void countChunks(Path inPath, StatusHandler statusHandler) throws IOException {
+        try {
+            String dimName = inPath.getFileName().toString();
+            statusHandler.info("Scheduling fixes in dimension " + dimName);
 
-        String dimName = inPath.getFileName().toString();
-        statusHandler.info("Scheduling fixes in dimension " + dimName);
+            Path part2dIn = inPath.resolve("region2d");
+            Files.createDirectories(part2dIn);
 
-        Path part2dIn = inPath.resolve("region2d");
-        Files.createDirectories(part2dIn);
+            Path part3dIn = inPath.resolve("region3d");
+            Files.createDirectories(part3dIn);
 
-        Path part3dIn = inPath.resolve("region3d");
-        Files.createDirectories(part3dIn);
+            SaveSection3D save3dIn =
+                    new SaveSection3D(
+                            new SimpleRegionProvider<>(
+                                    new EntryLocation3D.Provider(),
+                                    part3dIn,
+                                    (keyProv, r) -> MemoryReadRegion.<EntryLocation3D>builder()
+                                            .setDirectory(part3dIn)
+                                            .setRegionKey(r)
+                                            .setKeyProvider(keyProv)
+                                            .setSectorSize(512)
+                                            .build(),
+                                    (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName()))
+                            ),
+                            new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dIn,
+                                    (keyProvider, regionKey) -> new ExtRegion<>(part3dIn, Collections.emptyList(), keyProvider, regionKey),
+                                    (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                            )
+                    );
+            SaveSection2D save2dIn = new SaveSection2D(
+                    new SimpleRegionProvider<>(
+                            new EntryLocation2D.Provider(),
+                            part2dIn,
+                            (keyProv, r) -> MemoryReadRegion.<EntryLocation2D>builder()
+                                    .setDirectory(part2dIn)
+                                    .setRegionKey(r)
+                                    .setKeyProvider(keyProv)
+                                    .setSectorSize(512)
+                                    .build(),
+                            (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName()))
+                    ),
+                    new SimpleRegionProvider<>(new EntryLocation2D.Provider(), part2dIn,
+                            (keyProvider, regionKey) -> new ExtRegion<>(part2dIn, Collections.emptyList(), keyProvider, regionKey),
+                            (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                    )
+            );
 
-        SaveSection3D save3dIn = new SaveSection3D(
-                new RegionCache<>(
-                        SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3dIn, 512)
-                ),
-                new RegionCache<>(
-                        new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dIn,
-                                (keyProvider, regionKey) -> new ExtRegion<>(part3dIn, Collections.emptyList(), keyProvider, regionKey),
-                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
-                        )
-                ));
-        SaveSection2D save2dIn = new SaveSection2D(
-                new RegionCache<>(
-                        SimpleRegionProvider.createDefault(new EntryLocation2D.Provider(), part2dIn, 512)
-                ),
-                new RegionCache<>(
-                        new SimpleRegionProvider<>(new EntryLocation2D.Provider(), part2dIn,
-                                (keyProvider, regionKey) -> new ExtRegion<>(part2dIn, Collections.emptyList(), keyProvider, regionKey),
-                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
-                        )
-                ));
 
-        doCountChunks(save3dIn, save2dIn, statusHandler);
+            doCountChunks(save3dIn, save2dIn, statusHandler);
 
-        savesToClose.put(inPath.resolveSibling(inPath.getFileName() + "_3d_in"), save3dIn);
-        savesToClose.put(inPath.resolveSibling(inPath.getFileName() + "_2d_in"), save2dIn);
-        try (Stream<Path> stream = Files.list(inPath)) {
-            Set<Path> dimensions =
-                stream.filter(p -> p.getFileName().toString().startsWith("DIM") && Files.isDirectory(p)).collect(Collectors.toSet());
-            for (Path dim : dimensions) {
-                try {
-                    countChunks(dim.toString(), statusHandler);
-                } catch (Throwable t) {
-                    statusHandler.error("Could not count chunks in dimension: " + dim.getFileName().toString(), t);
+            savesToClose.put(inPath.resolveSibling(inPath.getFileName() + "_3d_in"), save3dIn);
+            savesToClose.put(inPath.resolveSibling(inPath.getFileName() + "_2d_in"), save2dIn);
+            try (Stream<Path> stream = Files.list(inPath)) {
+                Set<Path> dimensions =
+                        stream.filter(p -> p.getFileName().toString().startsWith("DIM") && Files.isDirectory(p)).collect(Collectors.toSet());
+                for (Path dim : dimensions) {
+                    countChunks(dim, statusHandler);
                 }
             }
+        } catch (Throwable t) {
+            statusHandler.error("Could not count chunks in dimension: " + inPath, t);
         }
     }
 
@@ -211,10 +295,7 @@ public class WorldFixer {
         });
     }
 
-    private void beginFixing(String worldLocation, String statusHandlerWorld, StatusHandler statusHandler) throws IOException {
-        Path inPath = Paths.get(worldLocation);
-        Path outPath = Paths.get(statusHandlerWorld);
-
+    private void beginFixing(Path inPath, Path outPath, StatusHandler statusHandler) throws IOException {
         String dimName = inPath.getFileName().toString();
         statusHandler.info("Scheduling fixes in dimension " + dimName);
 
@@ -230,21 +311,42 @@ public class WorldFixer {
         Path part3dOut = outPath.resolve("region3d");
         Files.createDirectories(part3dOut);
 
-        SaveSection3D save3dIn = new SaveSection3D(
-                new RegionCache<>(
-                        SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3dIn, 512)
-                ),
-                new RegionCache<>(
-                        new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dIn,
-                                (keyProvider, regionKey) -> new ExtRegion<>(part3dIn, Collections.emptyList(), keyProvider, regionKey),
-                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
-                        )
-                ));
+        SaveSection3D save3dIn =
+                new SaveSection3D(
+                        new RWLockingCachedRegionProvider<>(
+                                new SimpleRegionProvider<>(
+                                        new EntryLocation3D.Provider(),
+                                        part3dIn,
+                                        (keyProv, r) -> MemoryReadRegion.<EntryLocation3D>builder()
+                                                .setDirectory(part3dIn)
+                                                .setRegionKey(r)
+                                                .setKeyProvider(keyProv)
+                                                .setSectorSize(512)
+                                                .build(),
+                                        (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName()))
+                                )
+                        ),
+                        new RWLockingCachedRegionProvider<>(
+                                new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dIn,
+                                        (keyProvider, regionKey) -> new ExtRegion<>(part3dIn, Collections.emptyList(), keyProvider, regionKey),
+                                        (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
+                                )
+                        ));
         SaveSection2D save2dIn = new SaveSection2D(
-                new RegionCache<>(
-                        SimpleRegionProvider.createDefault(new EntryLocation2D.Provider(), part2dIn, 512)
+                new RWLockingCachedRegionProvider<>(
+                        new SimpleRegionProvider<>(
+                                new EntryLocation2D.Provider(),
+                                part2dIn,
+                                (keyProv, r) -> MemoryReadRegion.<EntryLocation2D>builder()
+                                        .setDirectory(part2dIn)
+                                        .setRegionKey(r)
+                                        .setKeyProvider(keyProv)
+                                        .setSectorSize(512)
+                                        .build(),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName()))
+                        )
                 ),
-                new RegionCache<>(
+                new RWLockingCachedRegionProvider<>(
                         new SimpleRegionProvider<>(new EntryLocation2D.Provider(), part2dIn,
                                 (keyProvider, regionKey) -> new ExtRegion<>(part2dIn, Collections.emptyList(), keyProvider, regionKey),
                                 (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
@@ -252,20 +354,40 @@ public class WorldFixer {
                 ));
 
         SaveSection3D save3dOut = new SaveSection3D(
-                new RegionCache<>(
-                        SimpleRegionProvider.createDefault(new EntryLocation3D.Provider(), part3dOut, 512)
+                new RWLockingCachedRegionProvider<>(
+                        new SimpleRegionProvider<>(
+                                new EntryLocation3D.Provider(),
+                                part3dOut,
+                                (keyProv, r) -> MemoryWriteRegion.<EntryLocation3D>builder()
+                                        .setDirectory(part3dOut)
+                                        .setRegionKey(r)
+                                        .setKeyProvider(keyProv)
+                                        .setSectorSize(512)
+                                        .build(),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName()))
+                        )
                 ),
-                new RegionCache<>(
+                new RWLockingCachedRegionProvider<>(
                         new SimpleRegionProvider<>(new EntryLocation3D.Provider(), part3dOut,
                                 (keyProvider, regionKey) -> new ExtRegion<>(part3dOut, Collections.emptyList(), keyProvider, regionKey),
                                 (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
                         )
                 ));
         SaveSection2D save2dOut = new SaveSection2D(
-                new RegionCache<>(
-                        SimpleRegionProvider.createDefault(new EntryLocation2D.Provider(), part2dOut, 512)
+                new RWLockingCachedRegionProvider<>(
+                        new SimpleRegionProvider<>(
+                                new EntryLocation2D.Provider(),
+                                part2dOut,
+                                (keyProv, r) -> MemoryWriteRegion.<EntryLocation2D>builder()
+                                        .setDirectory(part2dOut)
+                                        .setRegionKey(r)
+                                        .setKeyProvider(keyProv)
+                                        .setSectorSize(512)
+                                        .build(),
+                                (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName()))
+                        )
                 ),
-                new RegionCache<>(
+                new RWLockingCachedRegionProvider<>(
                         new SimpleRegionProvider<>(new EntryLocation2D.Provider(), part2dOut,
                                 (keyProvider, regionKey) -> new ExtRegion<>(part2dOut, Collections.emptyList(), keyProvider, regionKey),
                                 (dir, key) -> Files.exists(dir.resolve(key.getRegionKey().getName() + ".ext"))
@@ -283,7 +405,10 @@ public class WorldFixer {
                 stream.filter(p -> p.getFileName().toString().startsWith("DIM") && Files.isDirectory(p)).collect(Collectors.toSet());
             for (Path dim : dimensions) {
                 try {
-                    beginFixing(dim.toString(), outPath.resolve(inPath.relativize(dim)).toString(), statusHandler);
+                    // workaround for https://bugs.java.com/bugdatabase/view_bug.do?bug_id=8146754
+                    Path dimNoSlash = Utils.removeTrailingSlash(dim);
+                    Path inPathNoSlash = Utils.removeTrailingSlash(inPath);
+                    beginFixing(dim, outPath.resolve(inPathNoSlash.relativize(dimNoSlash).toString()), statusHandler);
                 } catch (Throwable t) {
                     statusHandler.error("Could not fix dimension: " + dim.getFileName().toString(), t);
                 }
@@ -292,82 +417,83 @@ public class WorldFixer {
     }
 
     private void fixSave(SaveSection3D save3dIn, SaveSection3D save3dOut, SaveSection2D save2dIn, SaveSection2D save2dOut, StatusHandler statusHandler) throws IOException {
-        save2dIn.forAllKeys(location -> {
-            submittedFix.incrementAndGet();
-            fixingExecutor.submit(() -> {
-                try {
-                    ByteBuffer buf;
-                    try {
-                        buf = save2dIn.load(location, true).orElse(null);
-                    } catch (Throwable t) {
-                        statusHandler.error("Error loading column data " + location + ", skipping...", t);
-                        return;
-                    }
-                    if (buf == null) {
-                        statusHandler.warning("Column at " + location + " doesn't have any data! This should not be possible. Skipping...");
-                        return;
-                    }
-                    statusHandler.chunkInfo(() -> "Fixing chunk " + location.getEntryX() + ", " + location.getEntryZ());
-                    ByteBuffer newBuf = fix2dBuffer(statusHandler, location, buf);
-                    if (newBuf == null) {
-                        return;
-                    }
-                    submittedIo.incrementAndGet();
-                    ioExecutor.submit(() -> {
-                        try {
-                            save2dOut.save(location, newBuf);
-                        } catch (IOException e) {
-                            statusHandler.error("An error occurred while saving column at " + location, e);
-                        }
-                        saved.incrementAndGet();
-                        showProgress(statusHandler, false);
-                    });
-                } catch (Throwable t) {
-                    statusHandler.error("An error occurred while fixing column at " + location, t);
-                }
-            });
-        });
-        save3dIn.forAllKeys(location -> {
-            submittedFix.incrementAndGet();
-            fixingExecutor.submit(() -> {
-                try {
-                    ByteBuffer buf;
-                    try {
-                        buf = save3dIn.load(location, true).orElse(null);
-                    } catch (Throwable t) {
-                        statusHandler.error("Error loading chunk data " + location + ", skipping...", t);
-                        return;
-                    }
-                    if (buf == null) {
-                        statusHandler.warning("Cube at " + location + " doesn't have any data! This should not be possible. Skipping...");
-                        return;
-                    }
+        save2dIn.forAllKeys(location -> CompletableFuture
+                .supplyAsync(() -> readValue(save2dIn, statusHandler, location), readExecutor)
+                .thenApplyAsync(buf -> fixBuffer2D(statusHandler, location, buf), fixingExecutor)
+                .thenAcceptAsync(buf -> writeBuffer(save2dOut, statusHandler, location, buf), writeExecutor)
+        );
+        save3dIn.forAllKeys(location -> CompletableFuture
+                .supplyAsync(() -> readValue(save3dIn, statusHandler, location), readExecutor)
+                .thenApplyAsync(buf -> fixBuffer3D(statusHandler, location, buf), fixingExecutor)
+                .thenAcceptAsync(buf -> writeBuffer(save3dOut, statusHandler, location, buf), writeExecutor)
+        );
+    }
 
-                    statusHandler.chunkInfo(() -> "Fixing chunk " + location.getEntryX() + ", " + location.getEntryY() + ", " + location.getEntryZ());
-                    ByteBuffer newBuf = fixBuffer(statusHandler, location, buf);
-                    if (newBuf == null) {
-                        return;
-                    }
-                    submittedIo.incrementAndGet();
-                    ioExecutor.submit(() -> {
-                        try {
-                            save3dOut.save(location, newBuf);
-                        } catch (IOException e) {
-                            statusHandler.error("An error occurred while saving chunk at " + location, e);
-                        }
-                        saved.incrementAndGet();
-                        showProgress(statusHandler, false);
-                    });
-                } catch (Throwable t) {
-                    statusHandler.error("An error occurred while fixing chunk at " + location, t);
-                }
-            });
-        });
+    private <S extends SaveSection<S, T>, T extends IKey<T>> ByteBuffer readValue(S save, StatusHandler statusHandler, T location) {
+        readingCount.incrementAndGet();
+        ByteBuffer buf;
+        try {
+            buf = save.load(location, true).orElse(null);
+        } catch (Throwable t) {
+            statusHandler.error("Error loading entry data " + location + ", skipping...", t);
+            return null;
+        }
+        if (buf == null) {
+            statusHandler.warning("Entry at " + location + " doesn't have any data! This should not be possible. Skipping...");
+            return null;
+        }
+        return buf;
+    }
+
+    private ByteBuffer fixBuffer2D(StatusHandler statusHandler, EntryLocation2D location, ByteBuffer buf) {
+        fixingCount.incrementAndGet();
+        statusHandler.chunkInfo(() -> "Fixing column " + location.getEntryX() + ", " + location.getEntryZ());
+        try {
+            return fix2dBuffer(statusHandler, location, buf);
+        } catch (Throwable t) {
+            statusHandler.error("An error occurred while fixing column at " + location, t);
+            return null;
+        }
+    }
+
+    private ByteBuffer fixBuffer3D(StatusHandler statusHandler, EntryLocation3D location, ByteBuffer buf) {
+        fixingCount.incrementAndGet();
+        statusHandler.chunkInfo(() -> "Fixing cube " + location.getEntryX() + ", " + location.getEntryY() + ", " + location.getEntryZ());
+        try {
+            return fixBuffer(statusHandler, location, buf);
+        } catch (Throwable t) {
+            statusHandler.error("An error occurred while fixing column at " + location, t);
+            return null;
+        }
+    }
+
+    private <S extends SaveSection<S, T>, T extends IKey<T>> void writeBuffer(S save2dOut, StatusHandler statusHandler, T location, ByteBuffer buf) {
+        writingCount.incrementAndGet();
+        try {
+            save2dOut.save(location, buf);
+        } catch (IOException e) {
+            statusHandler.error("An error occurred while saving entry at " + location, e);
+        }
+        doneCount.incrementAndGet();
+        showProgress(statusHandler, false);
     }
 
     private void showProgress(StatusHandler statusHandler, boolean isDone) {
-        statusHandler.progress(() -> isDone ? 1.0 : (saved.get() / (double) totalCount.get()), () -> isDone ? "DONE" : String.format("%d/%d/%d/%d (%.2f%%)",
-            saved.get(), submittedIo.get(), submittedFix.get(), totalCount.get(), 100 * saved.get() / (double) totalCount.get()), isDone);
+        statusHandler.progress(
+                () -> isDone ? 1.0 : (doneCount.get() / (double) totalCount.get()),
+                () -> isDone ? "DONE" : String.format("%d/%d (%.2f%%) [r=%d|f=%d|w=%d|rq=%d|fq=%d|wq=%d]",
+                        doneCount.get(),
+                        totalCount.get(),
+                        100 * doneCount.get() / (double) totalCount.get(),
+
+                        readingCount.get(),
+                        fixingCount.get(),
+                        writingCount.get(),
+                        readerQueue.size(),
+                        fixingQueue.size(),
+                        writeQueue.size()
+                ),
+                isDone);
     }
 
     private ByteBuffer fixBuffer(StatusHandler statusHandler, EntryLocation3D loc, ByteBuffer buf) throws IOException {

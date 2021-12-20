@@ -278,7 +278,7 @@ public class GuiMain extends JFrame {
             updateFixBtn();
             return;
         }
-        if (Files.exists(dstPath) && !Files.isDirectory(dstPath)) {
+        if (Files.exists(dstPath) && (!Files.isDirectory(dstPath) && !dstPath.getFileName().toString().endsWith(".zip"))) {
             JOptionPane.showMessageDialog(this, "The destination is not a directory!", "Error", JOptionPane.ERROR_MESSAGE);
             return;
         }
